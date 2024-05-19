@@ -192,20 +192,23 @@ func processLink(link string, account string, start time.Time, desiredHashPrefix
     // Melakukan permintaan HTTP
     response, err := http.Get(autofilledLink)
     if err != nil {
-        fmt.Println("Error making HTTP request:", err)                                   return
+        fmt.Println("Error making HTTP request:", err)                                   
+    return
     }
     defer response.Body.Close()
 
     // Membaca body dari respons
     body, err := ioutil.ReadAll(response.Body)
-    if err != nil {                                                                      fmt.Println("Error reading response body:", err)
+    if err != nil {                                                                      
+fmt.Println("Error reading response body:", err)
         return
     }
 
     // Parsing JSON response
     var result map[string]interface{}
     err = json.Unmarshal(body, &result)
-    if err != nil {                                                                      fmt.Println("Error parsing JSON response:", err)
+    if err != nil {                                                                      
+fmt.Println("Error parsing JSON response:", err)
         return
     }
 
@@ -223,20 +226,23 @@ func processLink(link string, account string, start time.Time, desiredHashPrefix
     // Menampilkan nilai hash
     fmt.Println("HASH:", hashFromResponse)
 
-    // Melakukan like pada unggahan                                                  fmt.Println("MELAKUKAN LIKE...")
+    // Melakukan like pada unggahan                                                  
+    fmt.Println("MELAKUKAN LIKE...")
     _, err = warpcast.Like(account, hashFromResponse)
     if err != nil {
         fmt.Printf("Gagal melakukan like: %s\n", err)
         return
     }
 
-    // Delay sesuai input pengguna                                                   time.Sleep(time.Duration(delayDuration) * time.Second)
+    // Delay sesuai input pengguna                                                   
+    time.Sleep(time.Duration(delayDuration) * time.Second)
 
     fmt.Println("SUKSES")
 
     // Menampilkan waktu sekarang di zona waktu GMT+8
     loc, err := time.LoadLocation("Asia/Singapore")
-    if err != nil {                                                                      fmt.Printf("Gagal memuat lokasi waktu: %s\n", err)
+    if err != nil {                                                                      
+    fmt.Printf("Gagal memuat lokasi waktu: %s\n", err)
         return
     }
     currentTime := time.Now().In(loc).Format("2006-01-02 15:04:05")
