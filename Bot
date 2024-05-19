@@ -1,0 +1,260 @@
+package main
+
+import (
+    "bufio"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "net/http"
+    "net/url"
+    "os"
+    "os/exec"
+    "regexp"
+    "strings"
+    "time"
+    "strconv"
+    "github.com/tokinaa/warpcast-tools/warpcast"
+    "github.com/tokinaa/warpcast-tools/degen"
+)
+
+func main() {
+    // Membersihkan terminal
+    clearTerminal()
+
+    // Prompt user for account token
+    fmt.Print("MASUKKAN AUTH TOKEN: ")
+    reader := bufio.NewReader(os.Stdin)
+    account, err := reader.ReadString('\n')
+    if err != nil {
+        log.Fatalf("Gagal membaca input: %s", err)
+    }
+    clearTerminal()
+    // Trim newline character
+    account = strings.TrimSpace(account)
+
+    start := time.Now()
+
+    // Pengecekan akun
+    profile, err := warpcast.GetMyProfile(account)
+    if err != nil {
+        fmt.Printf("Gagal memeriksa akun: %s\n", err)
+        return
+    }
+    // Menampilkan data profil akun
+    fmt.Println("[PROFIL AKUN]")
+    fmt.Printf("%-20s: %s\n", "NAME", profile.Result.State.User.DisplayName)
+    fmt.Printf("%-20s: %s\n", "USERNAME", profile.Result.State.User.Username)
+    fmt.Printf("%-20s: %d\n", "FID", profile.Result.State.User.Fid)
+    fmt.Printf("%-20s: %d\n", "FOLLOWERS", profile.Result.State.User.FollowerCount)
+    fmt.Printf("%-20s: %d\n", "FOLLOWING", profile.Result.State.User.FollowingCount)
+
+    fidStr := strconv.Itoa(profile.Result.State.User.Fid)
+
+    realAddress := ""
+    myAddress, err := warpcast.GetAddressVerified(account, fidStr)
+    if err != nil {
+        fmt.Printf("[ADDRESS] [GETTER] ERROR : %s\n", err)
+        return
+    }
+
+    if len(myAddress.Result.Verifications) < 1 {
+        realAddress = "No Address"
+    } else {
+        realAddress = myAddress.Result.Verifications[0].Address
+    }
+
+    fmt.Printf("%-20s: %s\n", "WALLET ADDRESS", realAddress)
+    fmt.Println()
+
+    fmt.Println("[DEGEN PROFILE]")
+
+    myAllowance, err := degen.GetTipAllowance(realAddress)
+    if err != nil {
+        fmt.Printf("[DEGEN] [ALLOWANCE] [GETTER] ERROR : %s\n", err)
+        return
+    }
+
+    remainingTipAllowance := 0
+    if len(myAllowance) != 0 {
+        remainingTipAllowance, _ = strconv.Atoi(myAllowance[0].TipAllowance)
+    }
+
+    fmt.Printf("%-20s: %d\n", "ALLOWANCE", remainingTipAllowance)
+
+    // Membuat garis
+    fmt.Println()
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Membuat slice kosong untuk menyimpan link
+    links := []string{}
+
+    // Meminta input untuk likedCount, countdown, dan delay
+    var likedCountMax, countdownDuration, delayDuration int
+    fmt.Print("MASUKKAN JUMLAH MAXIMAL LIKE SEBELUM JEDA           : ")
+    fmt.Scanln(&likedCountMax)
+    fmt.Print("MASUKKAN DURASI JEDA DALAM HITUNGAN MENIT           : ")
+    fmt.Scanln(&countdownDuration)
+    fmt.Print("MASUKKAN DURASI DELAY PER-LIKE DALAM HITUNGAN DETIK : ")
+    fmt.Scanln(&delayDuration)
+
+    //Membuat garis setelah peng-input-an
+    fmt.Println()
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Membaca input dari pengguna sampai pengguna mengetikkan "ok"
+    fmt.Println("KETIK LINK URL, ATAU KETIK 'ok' UNTUK MEMULAI/BERHENTI")
+    fmt.Println()
+    for {
+        var input string
+        fmt.Scanln(&input)
+        if input == "ok" {
+            break
+        }
+        extractedLinks := extractURLs(input)
+        links = append(links, extractedLinks...)
+    }
+
+    //Membuat Garis setelah mengetik ok
+    fmt.Println()
+    fmt.Println("===========================================================================")
+
+    likedCount := 0
+
+    // Memeriksa setiap link
+    for i, link := range links {
+        // Memeriksa apakah input sesuai format
+        u, err := url.Parse(link)
+        if err != nil {
+            fmt.Println("Error parsing URL:", err)
+            continue
+        }
+        path := u.Path
+        components := strings.Split(path, "/")
+        if len(components) < 3 {
+            fmt.Println("Format URL tidak sesuai.")
+            continue
+        }
+        fmt.Println()
+        desiredHashPrefix := components[2]
+
+        fmt.Printf("KE - %d. %s\n", i+1, link)
+
+        // Proses link dengan hash awal yang diinginkan
+        processLink(link, account, start, desiredHashPrefix, delayDuration)
+
+        likedCount++
+        // Jika sudah melakukan like pada likedCountMax link, beri jeda countdownDuration menit sebelum melanjutkan
+        if likedCount >= likedCountMax {
+            fmt.Println()
+            fmt.Printf("Jeda selama %d menit setelah melakukan like pada %d link...\n", countdownDuration, likedCountMax)
+            countdown := time.Tick(1 * time.Second)
+            for i := countdownDuration * 60; i > 0; i-- {
+                <-countdown
+                fmt.Printf("\rWaktu tersisa: %02d:%02d", i/60, i%60)
+            }
+            fmt.Println()
+            // Reset jumlah like yang sudah dilakukan
+            likedCount = 0
+            fmt.Println()
+            fmt.Println("===========================================================================")
+        }
+    }
+}
+
+func processLink(link string, account string, start time.Time, desiredHashPrefix string, delayDuration int) {
+    // Mendapatkan path dari URL
+    u, err := url.Parse(link)
+    if err != nil {
+        fmt.Println("Error parsing URL:", err)
+        return
+    }
+
+    // Mendapatkan path components
+    path := u.Path
+    components := strings.Split(path, "/")
+
+    // Mendapatkan username dan hash
+    username := components[1]
+    hash := components[2]
+
+    // Memeriksa apakah hash awal sesuai dengan yang diinginkan
+    if !strings.HasPrefix(hash, desiredHashPrefix) {
+        fmt.Printf("Hash tidak sesuai. Harap masukkan link dengan hash awalan %s\n", desiredHashPrefix)
+        return
+    }
+
+    // Membuat link otomatis untuk castHashPrefix dan username
+    autofilledLink := fmt.Sprintf("https://client.warpcast.com/v2/user-thread-casts?castHashPrefix=%s&username=%s", hash, username)
+
+    // Melakukan permintaan HTTP
+    response, err := http.Get(autofilledLink)
+    if err != nil {
+        fmt.Println("Error making HTTP request:", err)                                   return
+    }
+    defer response.Body.Close()
+
+    // Membaca body dari respons
+    body, err := ioutil.ReadAll(response.Body)
+    if err != nil {                                                                      fmt.Println("Error reading response body:", err)
+        return
+    }
+
+    // Parsing JSON response
+    var result map[string]interface{}
+    err = json.Unmarshal(body, &result)
+    if err != nil {                                                                      fmt.Println("Error parsing JSON response:", err)
+        return
+    }
+
+    // Mencari hash yang sesuai dengan hash awal yang diinginkan
+    var hashFromResponse string
+    casts := result["result"].(map[string]interface{})["casts"].([]interface{})
+    for _, cast := range casts {
+        castMap := cast.(map[string]interface{})
+        hashFromResponse = castMap["hash"].(string)
+        if strings.HasPrefix(hashFromResponse, desiredHashPrefix) {
+            break
+        }
+    }
+
+    // Menampilkan nilai hash
+    fmt.Println("HASH:", hashFromResponse)
+
+    // Melakukan like pada unggahan                                                  fmt.Println("MELAKUKAN LIKE...")
+    _, err = warpcast.Like(account, hashFromResponse)
+    if err != nil {
+        fmt.Printf("Gagal melakukan like: %s\n", err)
+        return
+    }
+
+    // Delay sesuai input pengguna                                                   time.Sleep(time.Duration(delayDuration) * time.Second)
+
+    fmt.Println("SUKSES")
+
+    // Menampilkan waktu sekarang di zona waktu GMT+8
+    loc, err := time.LoadLocation("Asia/Singapore")
+    if err != nil {                                                                      fmt.Printf("Gagal memuat lokasi waktu: %s\n", err)
+        return
+    }
+    currentTime := time.Now().In(loc).Format("2006-01-02 15:04:05")
+    fmt.Printf("Waktu sekarang (GMT+8): %s\n", currentTime)
+
+    fmt.Println()
+    fmt.Println("===========================================================================")
+}
+
+// clearTerminal membersihkan terminal
+func clearTerminal() {
+    cmd := exec.Command("clear") // Untuk Windows, ganti "clear" menjadi "cls"
+    cmd.Stdout = os.Stdout
+    cmd.Run()
+}
+
+// extractURLs extracts all URLs from a given text
+func extractURLs(text string) []string {
+    re := regexp.MustCompile(`https?://[^\s]+`)
+    return re.FindAllString(text, -1)
+}
