@@ -1,0 +1,447 @@
+package main
+
+import (
+    "bufio"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "net/http"
+    "net/url"
+    "os"
+    "os/exec"
+    "regexp"
+    "strconv"
+    "strings"
+    "time"
+
+    "github.com/tokinaa/warpcast-tools/warpcast"
+    "github.com/tokinaa/warpcast-tools/degen"
+)
+
+// Path to the file storing auth tokens
+const authTokenFile = "auth_tokens.txt"
+const failedLinksFile = "failed_links.txt"
+
+func main() {
+    clearTerminal()
+
+    // Load existing auth tokens from file
+    authTokens, err := loadAuthTokens()
+    if err != nil {
+        fmt.Printf("Failed to load auth tokens: %s\n", err)
+        return
+    }
+
+    // Prompt user for action
+    fmt.Println("1. Use existing auth token")
+    fmt.Println("2. Add new auth token")
+    fmt.Println("3. Remove auth token")
+    var choice int
+    fmt.Print("Enter your choice: ")
+    fmt.Scanln(&choice)
+
+    clearTerminal()
+
+    var authToken string
+
+    switch choice {
+    case 1:
+        // Use existing auth token
+        authToken, err = selectAuthToken(authTokens)
+        if err != nil {
+            fmt.Printf("Failed to select auth token: %s\n", err)
+            return
+        }
+        fmt.Println("Selected auth token:", authToken)
+    case 2:
+        // Add new auth token
+        fmt.Print("Enter new auth token: ")
+        reader := bufio.NewReader(os.Stdin)
+        newAuthToken, err := reader.ReadString('\n')
+        if err != nil {
+            fmt.Printf("Failed to read input: %s\n", err)
+            return
+        }
+        // Trim newline character
+        newAuthToken = strings.TrimSpace(newAuthToken)
+        authTokens = append(authTokens, newAuthToken)
+        err = saveAuthTokens(authTokens)
+        if err != nil {
+            fmt.Printf("Failed to save auth tokens: %s\n", err)
+            return
+        }
+        fmt.Println("New auth token added successfully.")
+        return
+    case 3:
+        // Remove auth token
+        authToken, err = selectAuthToken(authTokens)
+        if err != nil {
+            fmt.Printf("Failed to select auth token: %s\n", err)
+            return
+        }
+        authTokens = removeAuthToken(authTokens, authToken)
+        err = saveAuthTokens(authTokens)
+        if err != nil {
+            fmt.Printf("Failed to save auth tokens: %s\n", err)
+            return
+        }
+        fmt.Println("Auth token removed successfully.")
+        return
+    default:
+        fmt.Println("Invalid choice.")
+        return
+    }
+
+    clearTerminal()
+
+    // Prompt user for action
+    fmt.Println("Pilih tindakan yang akan diterapkan pada semua link:")
+    fmt.Println("1. Like")
+    fmt.Println("2. Recast")
+    fmt.Println("3. Like & Recast")
+    var actionChoice int
+    fmt.Print("Masukkan pilihan (1/2/3): ")
+    fmt.Scanln(&actionChoice)
+
+    // Validate action choice
+    if actionChoice < 1 || actionChoice > 3 {
+        fmt.Println("Pilihan tidak valid.")
+        return
+    }
+
+    // Continue with the script using the selected auth token
+    processWithAuthToken(authToken, actionChoice)
+}
+
+func processWithAuthToken(authToken string, actionChoice int) {
+    clearTerminal()
+
+    start := time.Now()
+
+    // Pengecekan akun
+    profile, err := warpcast.GetMyProfile(authToken)
+    if err != nil {
+        fmt.Printf("Gagal memeriksa akun: %s\n", err)
+        return
+    }
+
+    // Menampilkan data profil akun
+    fmt.Println("[PROFIL AKUN]")
+    fmt.Printf("%-20s: %s\n", "NAME", profile.Result.State.User.DisplayName)
+    fmt.Printf("%-20s: %s\n", "USERNAME", profile.Result.State.User.Username)
+    fmt.Printf("%-20s: %d\n", "FID", profile.Result.State.User.Fid)
+    fmt.Printf("%-20s: %d\n", "FOLLOWERS", profile.Result.State.User.FollowerCount)
+    fmt.Printf("%-20s: %d\n", "FOLLOWING", profile.Result.State.User.FollowingCount)
+
+    fidStr := strconv.Itoa(profile.Result.State.User.Fid)
+
+    realAddress := ""
+    myAddress, err := warpcast.GetAddressVerified(authToken, fidStr)
+    if err != nil {
+        fmt.Printf("[ADDRESS] [GETTER] ERROR : %s\n", err)
+        return
+    }
+
+    if len(myAddress.Result.Verifications) < 1 {
+        realAddress = "No Address"
+    } else {
+        realAddress = myAddress.Result.Verifications[0].Address
+    }
+
+    fmt.Printf("%-20s: %s\n", "WALLET ADDRESS", realAddress)
+    fmt.Println()
+    fmt.Println("[DEGEN PROFILE]")
+
+    myAllowance, err := degen.GetTipAllowance(realAddress)
+    if err != nil {
+        fmt.Printf("[DEGEN] [ALLOWANCE] [GETTER] ERROR : %s\n", err)
+        return
+    }
+
+    remainingTipAllowance := 0
+    if len(myAllowance) != 0 {
+        remainingTipAllowance, _ = strconv.Atoi(myAllowance[0].TipAllowance)
+    }
+
+    fmt.Printf("%-20s: %d\n", "ALLOWANCE", remainingTipAllowance)
+
+    fmt.Println()
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Meminta input untuk likedCount, countdown, dan delay
+    var likedCountMax, countdownDuration, delayDuration int
+    fmt.Print("MASUKKAN JUMLAH MAXIMAL LIKE SEBELUM JEDA           : ")
+    fmt.Scanln(&likedCountMax)
+    fmt.Print("MASUKKAN DURASI JEDA DALAM HITUNGAN MENIT           : ")
+    fmt.Scanln(&countdownDuration)
+    fmt.Print("MASUKKAN DURASI DELAY PER-LIKE DALAM HITUNGAN DETIK : ")
+    fmt.Scanln(&delayDuration)
+
+    fmt.Println()
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Membuat slice kosong untuk menyimpan link
+    links := []string{}
+
+    // Membaca input dari pengguna sampai pengguna mengetikkan "ok"
+    fmt.Println("KETIK LINK URL, ATAU KETIK 'ok' UNTUK MEMULAI/BERHENTI")
+    fmt.Println()
+    for {
+        var input string
+        fmt.Scanln(&input)
+        if input == "ok" {
+            break
+        }
+        extractedLinks := extractURLs(input)
+        links = append(links, extractedLinks...)
+    }
+
+    fmt.Println()
+    fmt.Println("===========================================================================")
+
+    likedCount := 0
+    // Memeriksa setiap link
+    for i, link := range links {
+        // Memeriksa apakah input sesuai format
+        u, err := url.Parse(link)
+        if err != nil {
+            fmt.Println("Error parsing URL:", err)
+            continue
+        }
+
+        path := u.Path
+        components := strings.Split(path, "/")
+        if len(components) < 3 {
+            fmt.Println("Format URL tidak sesuai.")
+            continue
+        }
+
+        fmt.Println()
+        desiredHashPrefix := components[2]
+
+        fmt.Printf("KE - %d. %s\n", i+1, link)
+
+        // Proses link dengan hash awal yang diinginkan
+        processLink(link, authToken, start, desiredHashPrefix, delayDuration, actionChoice)
+
+        likedCount++
+        // Jika sudah melakukan like pada likedCountMax link, beri jeda countdownDuration menit sebelum melanjutkan
+        if likedCount >= likedCountMax {
+            fmt.Println()
+            fmt.Printf("Jeda selama %d menit setelah melakukan like pada %d link...\n", countdownDuration, likedCountMax)
+            countdown := time.Tick(1 * time.Second)
+            for i := countdownDuration * 60; i > 0; i-- {
+                <-countdown
+                fmt.Printf("\rWaktu tersisa: %02d:%02d", i/60, i%60)
+            }
+            fmt.Println()
+            // Reset jumlah like yang sudah dilakukan
+            likedCount = 0
+            fmt.Println()
+            fmt.Println("===========================================================================")
+        }
+    }
+}
+
+func processLink(link string, account string, start time.Time, desiredHashPrefix string, delayDuration int, actionChoice int) {
+    // Mendapatkan path dari URL
+    u, err := url.Parse(link)
+    if err != nil {
+        fmt.Println("Error parsing URL:", err)
+        return
+    }
+
+    // Mendapatkan path components
+    path := u.Path
+    components := strings.Split(path, "/")
+    if len(components) < 3 {
+        fmt.Println("Format URL tidak sesuai.")
+        return
+    }
+
+    // Mendapatkan username dan hash
+    username := components[1]
+    hash := components[2]
+
+    // Memeriksa apakah hash awal sesuai dengan yang diinginkan
+    if !strings.HasPrefix(hash, desiredHashPrefix) {
+        fmt.Printf("Hash tidak sesuai. Harap masukkan link dengan hash awalan %s\n", desiredHashPrefix)
+        return
+    }
+
+    // Membuat link otomatis untuk castHashPrefix dan username
+    autofilledLink := fmt.Sprintf("https://client.warpcast.com/v2/user-thread-casts?castHashPrefix=%s&username=%s", hash, username)
+
+    // Melakukan permintaan HTTP
+    response, err := http.Get(autofilledLink)
+    if err != nil {
+        fmt.Println("Error making HTTP request:", err)
+        // Save failed link to file
+        saveFailedLink(link)
+        return
+    }
+    defer response.Body.Close()
+
+    // Membaca body dari respons
+    body, err := ioutil.ReadAll(response.Body)
+    if err != nil {
+        fmt.Println("Error reading response body:", err)
+        return
+    }
+
+    // Parsing JSON response
+    var result map[string]interface{}
+    err = json.Unmarshal(body, &result)
+    if err != nil {
+        fmt.Println("Error parsing JSON response:", err)
+        return
+    }
+
+    // Mencari hash yang sesuai dengan hash awal yang diinginkan
+    var hashFromResponse string
+    casts := result["result"].(map[string]interface{})["casts"].([]interface{})
+    for _, cast := range casts {
+        castMap := cast.(map[string]interface{})
+        hashFromResponse = castMap["hash"].(string)
+        if strings.HasPrefix(hashFromResponse, desiredHashPrefix) {
+            break
+        }
+    }
+
+    // Menampilkan nilai hash
+    fmt.Println("HASH:", hashFromResponse)
+
+    if actionChoice == 1 || actionChoice == 3 {
+        // Melakukan like pada unggahan
+        fmt.Println("MELAKUKAN LIKE...")
+        _, err = warpcast.Like(account, hashFromResponse)
+        if err != nil {
+            fmt.Printf("Gagal melakukan like: %s\n", err)
+            return
+        }
+        fmt.Println("LIKE SUKSES")
+    }
+
+    // Delay sesuai input pengguna
+    time.Sleep(time.Duration(delayDuration) * time.Second)
+
+    if actionChoice == 2 || actionChoice == 3 {
+        // Melakukan recast pada unggahan
+        fmt.Println("MELAKUKAN RECAST...")
+        _, err = warpcast.Recast(account, hashFromResponse)
+        if err != nil {
+            fmt.Printf("Gagal melakukan recast: %s\n", err)
+            return
+        }
+        fmt.Println("RECAST SUKSES")
+    }
+
+    // Delay sesuai input pengguna
+    time.Sleep(time.Duration(delayDuration) * time.Second)
+
+    // Menampilkan waktu sekarang di zona waktu GMT+8
+    loc, err := time.LoadLocation("Asia/Singapore")
+    if err != nil {
+        fmt.Printf("Gagal memuat lokasi waktu: %s\n", err)
+        return
+    }
+    currentTime := time.Now().In(loc).Format("2006-01-02 15:04:05")
+    fmt.Printf("Waktu sekarang (GMT+8): %s\n", currentTime)
+
+    fmt.Println()
+    fmt.Println("===========================================================================")
+}
+
+// clearTerminal clears the terminal screen
+func clearTerminal() {
+    cmd := exec.Command("clear") // For Windows, use "cls" instead of "clear"
+    cmd.Stdout = os.Stdout
+    cmd.Run()
+}
+
+// loadAuthTokens loads existing auth tokens from file
+func loadAuthTokens() ([]string, error) {
+    file, err := os.Open(authTokenFile)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return []string{}, nil
+        }
+        return nil, err
+    }
+    defer file.Close()
+
+    var tokens []string
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        tokens = append(tokens, scanner.Text())
+    }
+    return tokens, scanner.Err()
+}
+
+// saveAuthTokens saves auth tokens to file
+func saveAuthTokens(tokens []string) error {
+    file, err := os.Create(authTokenFile)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+
+    for _, token := range tokens {
+        _, err := file.WriteString(token + "\n")
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+// saveFailedLink saves failed link to a file
+func saveFailedLink(link string) {
+    file, err := os.OpenFile(failedLinksFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        fmt.Println("Failed to open file:", err)
+        return
+    }
+    defer file.Close()
+
+    _, err = fmt.Fprintf(file, "%s\n", link)
+    if err != nil {
+        fmt.Println("Failed to write to file:", err)
+    }
+}
+
+// selectAuthToken prompts the user to select an auth token
+func selectAuthToken(authTokens []string) (string, error) {
+    if len(authTokens) == 0 {
+        return "", fmt.Errorf("no auth tokens available")
+    }
+    fmt.Println("Available auth tokens:")
+    for i, token := range authTokens {
+        fmt.Printf("%d. %s\n", i+1, token)
+    }
+    var choice int
+    fmt.Print("Enter the number of the auth token to use: ")
+    fmt.Scanln(&choice)
+    if choice < 1 || choice > len(authTokens) {
+        return "", fmt.Errorf("invalid choice")
+    }
+    return authTokens[choice-1], nil
+}
+
+// removeAuthToken removes an auth token from the list
+func removeAuthToken(tokens []string, tokenToRemove string) []string {
+    for i, token := range tokens {
+        if token == tokenToRemove {
+            return append(tokens[:i], tokens[i+1:]...)
+        }
+    }
+    return tokens
+}
+
+// extractURLs extracts all URLs from a given text
+func extractURLs(text string) []string {
+    re := regexp.MustCompile(`https?://[^\s]+`)
+    return re.FindAllString(text, -1)
+}
