@@ -1,0 +1,309 @@
+package main
+
+import (
+    "bufio"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "net/http"
+    "net/url"
+    "os"
+    "os/exec"
+    "regexp"
+    "strings"
+    "time"
+)
+
+// Struct untuk menyimpan respons dari API
+type LikeResponse struct {
+    Result struct {
+        Likes []struct {
+            Type      string  `json:"type"`
+            Hash      string  `json:"hash"`
+            Reactor   Reactor `json:"reactor"`
+            Timestamp int64   `json:"timestamp"`
+            CastHash  string  `json:"castHash"`
+        } `json:"likes"`
+    } `json:"result"`
+    Next struct {
+        Cursor string `json:"cursor"`
+    } `json:"next"`
+}
+
+// Struct untuk menyimpan informasi tentang pengguna yang memberikan suka
+type Reactor struct {
+    FID         int    `json:"fid"`
+    Username    string `json:"username"`
+    DisplayName string `json:"displayName"`
+}
+
+// Fungsi utama
+func main() {
+clearTerminal()
+    // Membaca username yang akan diperiksa dari input pengguna
+    fmt.Print("MASUKKAN USERNAME YANG INGIN DIPERIKSA (pisahkan dengan koma jika lebih dari satu): ")
+    reader := bufio.NewReader(os.Stdin)
+    usernamesInput, _ := reader.ReadString('\n')
+    usernames := strings.Split(strings.TrimSpace(usernamesInput), ",")
+
+    // Trim spaces from each username
+    for i := range usernames {
+        usernames[i] = strings.TrimSpace(usernames[i])
+    }
+
+    // Membuat slice kosong untuk menyimpan link
+    links := []string{}
+
+    // Membaca input dari pengguna sampai pengguna mengetikkan "ok"
+    fmt.Println("KETIK LINK URL, ATAU KETIK 'ok' UNTUK MEMULAI/BERHENTI")
+    fmt.Println()
+    for {
+        var input string
+
+        input, _ = reader.ReadString('\n')
+        input = strings.TrimSpace(input)
+        if input == "ok" {
+            break
+        }
+        extractedLinks := extractURLs(input)
+        links = append(links, extractedLinks...)
+    }
+    fmt.Println()
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Buat peta untuk menghitung like dan belum like per username
+    likedCount := make(map[string]int)
+    notLikedCount := make(map[string]int)
+    notLikedLinks := make(map[string][]string)
+
+    // Inisialisasi jumlah username
+    for _, username := range usernames {
+        likedCount[username] = 0
+        notLikedCount[username] = 0
+    }
+
+    // Memproses setiap link yang dimasukkan
+    for _, link := range links {
+        fmt.Println("URL:", link)
+        account := "dummy_account_value"
+        _, likedUsernames, notLikedUsernames, err := processLink(link, account, time.Now(), "", 0, usernames)
+        if err != nil {
+            fmt.Println("Error processing link:", err)
+            continue
+        }
+        if len(likedUsernames) > 0 {
+            for _, username := range likedUsernames {
+                likedCount[username]++
+            }
+            fmt.Printf("\033[32mUsername '%s' telah memberikan like pada cast ini.\033[0m\n", strings.Join(likedUsernames, ", "))
+        }
+        if len(notLikedUsernames) > 0 {
+            for _, username := range notLikedUsernames {
+                notLikedCount[username]++
+                notLikedLinks[username] = append(notLikedLinks[username], link)
+            }
+            fmt.Printf("\033[31mUsername '%s' belum memberikan like pada cast ini.\033[0m\n", strings.Join(notLikedUsernames, ", "))
+        }
+        fmt.Println()
+    }
+    fmt.Println("===========================================================================")
+    fmt.Println()
+
+    // Menampilkan hasil akhir
+    for _, username := range usernames {
+        fmt.Printf("\nUsername '%s' sudah memberikan like pada %d link\n", username, likedCount[username])
+        fmt.Printf("Username '%s' belum memberikan like pada %d link\n", username, notLikedCount[username])
+    }
+
+    // Menyimpan URL yang belum di-like ke dalam file
+    for username, links := range notLikedLinks {
+        if len(links) > 0 {
+            fileName := fmt.Sprintf("%s_not_liked_links.txt", username)
+            file, err := os.Create(fileName)
+            if err != nil {
+                fmt.Println("Error creating file:", err)
+                continue
+            }
+            defer file.Close()
+
+            for _, link := range links {
+                file.WriteString(link + "\n")
+            }
+            fmt.Printf("URL yang belum di-like oleh '%s' telah disimpan ke %s\n", username, fileName)
+        }
+    }
+}
+
+// Fungsi untuk memproses link dan mendapatkan hash dari API
+func processLink(link string, account string, start time.Time, desiredHashPrefix string, delayDuration int, usernames []string) (bool, []string, []string, error) {
+    u, err := url.Parse(link)
+    if err != nil {
+        return false, nil, nil, fmt.Errorf("error parsing URL: %v", err)
+    }
+
+    path := u.Path
+    components := strings.Split(path, "/")
+
+    if len(components) < 3 {
+        return false, nil, nil, fmt.Errorf("invalid URL format")
+    }
+
+    username := components[1]
+    hash := components[2]
+
+    autofilledLink := fmt.Sprintf("https://client.warpcast.com/v2/user-thread-casts?castHashPrefix=%s&username=%s", hash, username)
+
+    response, err := http.Get(autofilledLink)
+    if err != nil {
+        return false, nil, nil, fmt.Errorf("error making HTTP request: %v", err)
+    }
+    defer response.Body.Close()
+
+    body, err := ioutil.ReadAll(response.Body)
+    if err != nil {
+        return false, nil, nil, fmt.Errorf("error reading response body: %v", err)
+    }
+
+    var result map[string]interface{}
+    err = json.Unmarshal(body, &result)
+    if err != nil {
+        return false, nil, nil, fmt.Errorf("error parsing JSON response: %v", err)
+    }
+
+    var hashFromResponse string
+    casts, ok := result["result"].(map[string]interface{})["casts"].([]interface{})
+    if !ok || len(casts) == 0 {
+        return false, nil, nil, fmt.Errorf("no casts found")
+    }
+
+    for _, cast := range casts {
+        castMap := cast.(map[string]interface{})
+        hashFromResponse = castMap["hash"].(string)
+        if strings.HasPrefix(hashFromResponse, hash) {
+            break
+        }
+    }
+
+
+
+    likeAPIURL := fmt.Sprintf("https://client.warpcast.com/v2/cast-likes?castHash=%s", hashFromResponse)
+    return collectAndProcessLikes(likeAPIURL, usernames)
+}
+
+// Fungsi untuk mengumpulkan semua likes dan kemudian memeriksa apakah username tertentu telah memberikan like
+func collectAndProcessLikes(apiURL string, usernames []string) (bool, []string, []string, error) {
+    allLikes := []Reactor{}
+
+    data, err := getEntries(apiURL)
+    if err != nil {
+        return false, nil, nil, err
+    }
+
+    allLikes = append(allLikes, extractLikes(data)...)
+
+    for data.Next.Cursor != "" {
+        data, err = getEntries(apiURL + "&cursor=" + data.Next.Cursor)
+        if err != nil {
+            return false, nil, nil, err
+        }
+        allLikes = append(allLikes, extractLikes(data)...)
+    }
+
+    likedUsernames, notLikedUsernames := checkUsernames(allLikes, usernames)
+    if len(likedUsernames) > 0 {
+        return true, likedUsernames, notLikedUsernames, nil
+    }
+    return false, likedUsernames, notLikedUsernames, nil
+}
+
+// Fungsi untuk mengekstrak likes dari respons
+func extractLikes(data LikeResponse) []Reactor {
+    likes := []Reactor{}
+    for _, like := range data.Result.Likes {
+        likes = append(likes, like.Reactor)
+    }
+    return likes
+}
+
+// Fungsi untuk memeriksa apakah salah satu dari beberapa username telah memberikan like
+func checkUsernames(allLikes []Reactor, usernames []string) ([]string, []string) {
+    likedUsernames := []string{}
+    notLikedUsernames := usernames
+
+    usernameSet := make(map[string]struct{})
+    for _, username := range usernames {
+        usernameSet[username] = struct{}{}
+    }
+    for _, like := range allLikes {
+        if _, exists := usernameSet[like.Username]; exists {
+            likedUsernames = append(likedUsernames, like.Username)
+            notLikedUsernames = removeFromSlice(notLikedUsernames, like.Username)
+        }
+    }
+    return likedUsernames, notLikedUsernames
+}
+
+// Fungsi untuk menghapus elemen dari slice
+func removeFromSlice(slice []string, element string) []string {
+    newSlice := []string{}
+    for _, item := range slice {
+        if item != element {
+            newSlice = append(newSlice, item)
+        }
+    }
+    return newSlice
+}
+
+// Fungsi untuk mengambil entri dari API likes dengan retry logic
+func getEntries(url string) (LikeResponse, error) {
+    var data LikeResponse
+
+    maxRetries := 5
+    retryDelay := 5 * time.Second
+
+    for i := 0; i < maxRetries; i++ {
+        response, err := http.Get(url)
+        if err != nil {
+            if i < maxRetries-1 {
+
+                time.Sleep(retryDelay)
+                continue
+            }
+            return data, err
+        }
+        defer response.Body.Close()
+
+        if response.StatusCode == http.StatusOK {
+            bodyBytes, err := ioutil.ReadAll(response.Body)
+            if err != nil {
+                return data, err
+            }
+
+            err = json.Unmarshal(bodyBytes, &data)
+            if err != nil {
+                return data, err
+            }
+            return data, nil
+        } else if response.StatusCode == 504 || response.StatusCode == 502 || response.StatusCode == 500 || (response.StatusCode == 400 && i < maxRetries-1) {
+
+            time.Sleep(retryDelay)
+            continue
+        } else {
+            return data, fmt.Errorf("unexpected status code: %d", response.StatusCode)
+        }
+    }
+    return data, fmt.Errorf("max retries reached")
+}
+// clearTerminal clears the terminal screen
+func clearTerminal() {
+    cmd := exec.Command("clear") // For Windows, use "cls" instead of "clear"
+    cmd.Stdout = os.Stdout
+    cmd.Run()
+}
+
+// Fungsi untuk mengekstraksi URL dari teks
+func extractURLs(text string) []string {
+    re := regexp.MustCompile(`https?://[^\s]+`)
+    return re.FindAllString(text, -1)
+}
